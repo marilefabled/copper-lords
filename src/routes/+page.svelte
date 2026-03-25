@@ -25,19 +25,20 @@
     let splashFading = $state(false);
 
     onMount(() => {
-        setTimeout(() => splashLine1 = true, 400);
-        setTimeout(() => splashLine2 = true, 1400);
-        setTimeout(() => splashLine3 = true, 2400);
-        setTimeout(() => splashLine4 = true, 3400);
+        setTimeout(() => { if (phase === 'splash') splashLine1 = true; }, 400);
+        setTimeout(() => { if (phase === 'splash') splashLine2 = true; }, 1400);
+        setTimeout(() => { if (phase === 'splash') splashLine3 = true; }, 2400);
+        setTimeout(() => { if (phase === 'splash') splashLine4 = true; }, 3400);
         setTimeout(() => {
+            if (phase !== 'splash') return;
             splashFading = true;
-            setTimeout(() => phase = 'title', 500);
+            setTimeout(() => { if (phase === 'splash') phase = 'title'; }, 500);
         }, 5200);
     });
 
     function skipSplash() {
         splashFading = true;
-        setTimeout(() => phase = 'title', 300);
+        setTimeout(() => { if (phase === 'splash') phase = 'title'; }, 300);
     }
 
     async function startGame() {
