@@ -111,6 +111,9 @@ export class SimulationEngine {
                 local CopperLords = require("copperlords")
                 _G.engine = Engine.new({ seed = os.time(), log_sink = __js_log_sink })
                 CopperLords.init(_G.engine)
+                -- Run GC more aggressively to prevent WASM heap exhaustion
+                collectgarbage("setpause", 100)
+                collectgarbage("setstepmul", 400)
             `);
 
             // Precompile all hot-path functions once so doString never
