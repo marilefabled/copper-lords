@@ -1,0 +1,11 @@
+{
+  "name": "dredwork-editor",
+  "version": "1.0.0",
+  "description": "Config-driven text editor for Lua game projects",
+  "main": "index.js",
+  "bin": {
+    "dredwork-editor": "./index.js"
+  },
+  "author": "adarkfable",
+  "license": "MIT"
+}

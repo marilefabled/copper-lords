@@ -1,0 +1,9 @@
+{
+  "name": "dredwork-aibridge",
+  "version": "1.0.0",
+  "description": "Game-to-AI narrative pipeline — encode game state, decode on server, generate AI narratives with hooks",
+  "main": "server/index.js",
+  "author": "adarkfable",
+  "license": "MIT",
+  "keywords": ["game", "ai", "narrative", "pipeline", "lua", "claude"]
+}

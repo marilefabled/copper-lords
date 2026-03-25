@@ -1,0 +1,92 @@
+-- Dark Legacy — Wealth System Tests
+
+local Wealth = require("dredwork_world.wealth")
+
+describe("Wealth", function()
+
+    it("creates with default value 50", function()
+        local w = Wealth.new()
+        assert(w.value == 50, "default 50")
+        assert(w.peak == 50, "peak 50")
+        assert(w.nadir == 50, "nadir 50")
+    end)
+
+    it("creates with custom initial value", function()
+        local w = Wealth.new(75)
+        assert(w.value == 75, "initial 75")
+    end)
+
+    it("get_tier returns correct tier", function()
+        local w = Wealth.new(10)
+        assert(Wealth.get_tier(w).label == "Destitute", "destitute at 10")
+        w.value = 50
+        assert(Wealth.get_tier(w).label == "Comfortable", "comfortable at 50")
+        w.value = 95
+        assert(Wealth.get_tier(w).label == "Dynastic", "dynastic at 95")
+    end)
+
+    it("change adjusts value and records history", function()
+        local w = Wealth.new(50)
+        Wealth.change(w, 10, "trade", 1, "Sold goods")
+        assert(w.value > 50, "increased: " .. w.value)
+        assert(#w.history == 1, "one history entry")
+        assert(w.history[1].source == "trade", "source recorded")
+    end)
+
+    it("change clamps to 0-100", function()
+        local w = Wealth.new(5)
+        Wealth.change(w, -50, "loss", 1)
+        assert(w.value == 0, "clamped to 0")
+        w.value = 95
+        Wealth.change(w, 50, "plunder", 1)
+        assert(w.value == 100, "clamped to 100")
+    end)
+
+    it("tracks peak and nadir", function()
+        local w = Wealth.new(50)
+        Wealth.change(w, 30, "trade", 1)
+        Wealth.change(w, -50, "loss", 2)
+        assert(w.peak > 50, "peak above start")
+        assert(w.nadir < 50, "nadir below start")
+    end)
+
+    it("decay regresses toward 50", function()
+        local w = Wealth.new(80)
+        Wealth.decay(w, 1)
+        assert(w.value < 80 and w.value > 50, "decayed toward 50: " .. w.value)
+        local w2 = Wealth.new(20)
+        Wealth.decay(w2, 1)
+        assert(w2.value > 20 and w2.value < 50, "decayed up toward 50: " .. w2.value)
+    end)
+
+    it("matchmaking_modifier penalizes poor families", function()
+        local poor = Wealth.new(10)
+        local rich = Wealth.new(85)
+        assert(Wealth.matchmaking_modifier(poor) < 0, "poor penalty")
+        assert(Wealth.matchmaking_modifier(rich) > 0, "rich bonus")
+    end)
+
+    it("check_gate works correctly", function()
+        local w = Wealth.new(30)
+        local ok, reason = Wealth.check_gate(w, 50)
+        assert(not ok, "gate fails")
+        assert(reason, "has reason")
+        ok = Wealth.check_gate(w, 20)
+        assert(ok, "gate passes")
+    end)
+
+    it("generation_net sums correctly", function()
+        local w = Wealth.new(50)
+        Wealth.change(w, 10, "trade", 5)
+        Wealth.change(w, -5, "loss", 5)
+        Wealth.change(w, 8, "trade", 6)
+        local net = Wealth.generation_net(w, 5)
+        assert(net ~= 0, "non-zero net for gen 5")
+    end)
+
+    it("describe returns non-empty string", function()
+        local w = Wealth.new(50)
+        local desc = Wealth.describe(w)
+        assert(#desc > 0, "non-empty description")
+    end)
+end)

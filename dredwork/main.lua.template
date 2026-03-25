@@ -1,0 +1,75 @@
+-- dredwork LÖVE2D — Standard Entry Template
+-- This shows how to initialize and drive the engine in a LÖVE project.
+
+local Engine = require("dredwork_engine")
+
+local dredwork = nil
+
+function love.load()
+    -- 1. Initialize the engine with desired modules
+    dredwork = Engine.new({
+        seed = os.time(),
+        modules = {
+            chronology = "dredwork_chronology",
+            economy    = "dredwork_economy",
+            politics   = "dredwork_politics",
+            home       = "dredwork_home",
+            genetics   = "dredwork_genetics",
+            rumor      = "dredwork_rumor"
+        }
+    })
+
+    -- 2. Optional: Register custom UI listeners
+    dredwork:on("ADVANCE_GENERATION", function(ctx)
+        print("UI: The world has shifted into a new generation!")
+    end)
+    
+    print("Engine Initialized.")
+end
+
+function love.update(dt)
+    -- 3. Drive the engine (1 day per real-world second)
+    dredwork:update(dt, 1.0)
+
+    -- 4. Consume buffered UI events
+    local events = dredwork:pop_ui_events()
+    for _, event in ipairs(events) do
+        if event.name == "NEW_MONTH" then
+            -- Trigger a toast notification or sound
+        elseif event.name == "MATCH_COMPLETED" then
+            -- Open a results screen
+        end
+    end
+end
+
+function love.draw()
+    local gs = dredwork.game_state
+    
+    -- 5. Visualization (Accessing the 'Temporal Truth')
+    local time_str = dredwork.chronology:get_formatted_time()
+    love.graphics.print(time_str, 20, 20)
+    
+    -- 6. Direct State Access (Clean and read-friendly)
+    if gs.politics then
+        love.graphics.print("Legitimacy: " .. math.floor(gs.politics.legitimacy), 20, 40)
+        love.graphics.print("Unrest: " .. math.floor(gs.politics.unrest), 20, 60)
+    end
+    
+    if gs.resources then
+        love.graphics.print("Treasury: " .. math.floor(gs.resources.gold) .. "g", 20, 80)
+    end
+end
+
+function love.keypressed(key)
+    -- 7. Interaction Pattern
+    if key == "space" then
+        -- Fast forward!
+        dredwork:advance_days(30)
+    end
+    
+    if key == "s" then
+        -- Save the entire world state
+        local snapshot = dredwork:serialize()
+        -- (Write snapshot to file using love.filesystem)
+    end
+end
