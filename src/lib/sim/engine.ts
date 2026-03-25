@@ -67,11 +67,15 @@ export class SimulationEngine {
     private factory: LuaFactory;
     private lua: any;
 
+    // Cached direct references to precompiled Lua functions.
+    // Calling these avoids doString string parsing and chunk creation at runtime,
+    // which is what was causing the _ENV upvalue corruption over time.
+    private _fn: Record<string, (...args: any[]) => Promise<any>> = {};
+
     constructor() {
-        // Give Lua 32MB initial / 128MB max instead of the default 16MB.
-        // The incremental GC can't keep WASM heap tidy enough with the default
-        // allocation; bumping the ceiling prevents heap-exhaustion corruption.
-        const mem = new WebAssembly.Memory({ initial: 512, maximum: 2048 });
+        // 32 MB fixed heap (512 pages × 64 KB). Fixed size (initial === maximum)
+        // prevents WASM memory growth which can invalidate Lua's internal C pointers.
+        const mem = new WebAssembly.Memory({ initial: 512, maximum: 512 });
         this.factory = new LuaFactory(undefined, mem);
     }
 
@@ -115,19 +119,15 @@ export class SimulationEngine {
                 local CopperLords = require("copperlords")
                 _G.engine = Engine.new({ seed = os.time(), log_sink = __js_log_sink })
                 CopperLords.init(_G.engine)
-                -- Run GC more aggressively to prevent WASM heap exhaustion
+                -- Aggressive GC to keep heap tidy
                 collectgarbage("setpause", 100)
                 collectgarbage("setstepmul", 400)
             `);
 
-            // Precompile all hot-path functions once so doString never
-            // recompiles them. Each tick only calls these named globals.
+            // Precompile all hot-path functions as named Lua globals.
+            // __cl_bribe returns a table (not multi-return) for clean bridge crossing.
             await this.lua.doString(`
                 local CL = require("copperlords")
-
-                _G.__cl_step = function()
-                    _G.engine:step()
-                end
 
                 _G.__cl_get_state = function()
                     local gs = _G.engine.game_state
@@ -203,8 +203,11 @@ export class SimulationEngine {
                     }
                 end
 
-                _G.__cl_get_events = function()
-                    return _G.engine:pop_ui_events()
+                -- Combined tick: step + state + events in one call.
+                _G.__cl_tick = function()
+                    _G.engine:step()
+                    local evts = _G.engine:pop_ui_events()
+                    return { state=__cl_get_state(), events=evts }
                 end
 
                 _G.__cl_set_setting = function(gid, key, val)
@@ -215,32 +218,38 @@ export class SimulationEngine {
 
                 _G.__cl_move = function(gid, did)
                     CL.move_grifter(_G.engine, gid, did)
+                    return __cl_get_state()
                 end
 
+                -- Returns a table so the bridge doesn't have to handle multi-return.
                 _G.__cl_bribe = function(gid)
                     local ok, cost = CL.bribe_grifter(_G.engine, gid)
-                    return ok and 1 or 0, cost or 0
+                    return { ok=ok and 1 or 0, cost=cost or 0, state=__cl_get_state() }
                 end
 
                 _G.__cl_buy_item = function(iid, gid)
-                    return CL.buy_item(_G.engine, iid, gid) and 1 or 0
+                    local ok = CL.buy_item(_G.engine, iid, gid) and 1 or 0
+                    return { ok=ok, state=__cl_get_state() }
                 end
 
                 _G.__cl_hire = function(idx)
-                    return CL.hire_grifter(_G.engine, idx) and 1 or 0
+                    local ok = CL.hire_grifter(_G.engine, idx) and 1 or 0
+                    return { ok=ok, state=__cl_get_state() }
                 end
 
                 _G.__cl_bribe_cost = function(gid)
                     return CL.get_bribe_cost(_G.engine, gid)
                 end
-
-                -- Combined tick: step + serialize state + drain events in one call.
-                -- Reduces doString round-trips from 3 to 1 per game tick.
-                _G.__cl_tick = function()
-                    _G.engine:step()
-                    return { state = __cl_get_state(), events = _G.engine:pop_ui_events() }
-                end
             `);
+
+            // Cache direct JS references to every precompiled Lua function.
+            // At runtime we call fn() instead of doString("fn()"), which
+            // never allocates a new Lua chunk or _ENV upvalue.
+            for (const name of ['__cl_tick', '__cl_get_state', '__cl_set_setting',
+                                 '__cl_move', '__cl_bribe', '__cl_buy_item',
+                                 '__cl_hire', '__cl_bribe_cost']) {
+                this._fn[name] = this.lua.global.get(name);
+            }
 
         } catch (err) {
             console.error("Simulation Engine Init Error:", err);
@@ -249,83 +258,61 @@ export class SimulationEngine {
     }
 
     async tick(): Promise<{ state: GameState; events: any[] }> {
-        const raw = await this.lua.doString(`return __cl_tick()`);
-        const result = luaToJS(raw) as any;
-        const events = result.events
-            ? (Array.isArray(result.events) ? result.events : Object.values(result.events))
+        const raw = luaToJS(await this._fn['__cl_tick']());
+        const events = raw.events
+            ? (Array.isArray(raw.events) ? raw.events : Object.values(raw.events))
             : [];
-        return { state: result.state as GameState, events };
-    }
-
-    async step() {
-        await this.lua.doString(`__cl_step()`);
-        return this.getState();
+        return { state: raw.state as GameState, events };
     }
 
     async getState(): Promise<GameState> {
-        const raw = await this.lua.doString(`return __cl_get_state()`);
-        return luaToJS(raw) as GameState;
+        return luaToJS(await this._fn['__cl_get_state']()) as GameState;
     }
 
     async setGrifterSetting(grifterId: number, key: string, value: any) {
-        const luaVal = typeof value === 'string' ? `"${value}"` : value;
-        await this.lua.doString(`__cl_set_setting(${grifterId}, "${key}", ${luaVal})`);
+        await this._fn['__cl_set_setting'](grifterId, key, value);
     }
 
-    async moveGrifter(grifterId: number, districtId: string) {
-        await this.lua.doString(`__cl_move(${grifterId}, "${districtId}")`);
+    async moveGrifter(grifterId: number, districtId: string): Promise<GameState> {
+        return luaToJS(await this._fn['__cl_move'](grifterId, districtId)) as GameState;
     }
 
-    async bribeGrifter(grifterId: number): Promise<{ success: boolean; cost: number }> {
+    async bribeGrifter(grifterId: number): Promise<{ success: boolean; cost: number; state: GameState }> {
         try {
-            const result = await this.lua.doString(`
-                local ok, cost = __cl_bribe(${grifterId})
-                return { ok=ok, cost=cost }
-            `);
-            const r = luaToJS(result);
-            return { success: r.ok === 1, cost: r.cost || 0 };
+            const r = luaToJS(await this._fn['__cl_bribe'](grifterId));
+            return { success: r.ok === 1, cost: r.cost || 0, state: r.state };
         } catch (err) {
             console.error("Bribe error:", err);
-            return { success: false, cost: 0 };
+            return { success: false, cost: 0, state: await this.getState() };
         }
     }
 
-    async buyItem(itemId: string, grifterId: number): Promise<boolean> {
+    async buyItem(itemId: string, grifterId: number): Promise<{ ok: boolean; state: GameState }> {
         try {
-            const result = await this.lua.doString(`return __cl_buy_item("${itemId}", ${grifterId})`);
-            return result === 1;
+            const r = luaToJS(await this._fn['__cl_buy_item'](itemId, grifterId));
+            return { ok: r.ok === 1, state: r.state };
         } catch (err) {
             console.error("Buy item error:", err);
-            return false;
+            return { ok: false, state: await this.getState() };
         }
     }
 
-    async hireGrifter(hireIndex: number): Promise<boolean> {
+    async hireGrifter(hireIndex: number): Promise<{ ok: boolean; state: GameState }> {
         try {
-            const result = await this.lua.doString(`return __cl_hire(${hireIndex})`);
-            return result === 1;
+            const r = luaToJS(await this._fn['__cl_hire'](hireIndex));
+            return { ok: r.ok === 1, state: r.state };
         } catch (err) {
             console.error("Hire error:", err);
-            return false;
+            return { ok: false, state: await this.getState() };
         }
     }
 
     async getBribeCost(grifterId: number): Promise<number> {
         try {
-            return await this.lua.doString(`return __cl_bribe_cost(${grifterId})`) || 0;
+            return (await this._fn['__cl_bribe_cost'](grifterId)) || 0;
         } catch (err) {
             console.error("Get bribe cost error:", err);
             return 0;
-        }
-    }
-
-    async getEvents() {
-        try {
-            const raw = await this.lua.doString(`return __cl_get_events()`);
-            return luaToJS(raw);
-        } catch (err) {
-            console.error("Get events error:", err);
-            return [];
         }
     }
 }
