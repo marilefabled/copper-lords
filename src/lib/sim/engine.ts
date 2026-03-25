@@ -233,6 +233,13 @@ export class SimulationEngine {
                 _G.__cl_bribe_cost = function(gid)
                     return CL.get_bribe_cost(_G.engine, gid)
                 end
+
+                -- Combined tick: step + serialize state + drain events in one call.
+                -- Reduces doString round-trips from 3 to 1 per game tick.
+                _G.__cl_tick = function()
+                    _G.engine:step()
+                    return { state = __cl_get_state(), events = _G.engine:pop_ui_events() }
+                end
             `);
 
         } catch (err) {
