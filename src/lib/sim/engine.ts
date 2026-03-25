@@ -68,7 +68,11 @@ export class SimulationEngine {
     private lua: any;
 
     constructor() {
-        this.factory = new LuaFactory();
+        // Give Lua 32MB initial / 128MB max instead of the default 16MB.
+        // The incremental GC can't keep WASM heap tidy enough with the default
+        // allocation; bumping the ceiling prevents heap-exhaustion corruption.
+        const mem = new WebAssembly.Memory({ initial: 512, maximum: 2048 });
+        this.factory = new LuaFactory(undefined, mem);
     }
 
     async init() {
