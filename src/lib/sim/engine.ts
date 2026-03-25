@@ -204,6 +204,7 @@ export class SimulationEngine {
             for _, g in ipairs(_G.engine.game_state.grifters) do
                 if g.id == ${grifterId} then
                     g.settings["${key}"] = ${typeof value === 'string' ? `"${value}"` : value}
+                    break
                 end
             end
         `);
