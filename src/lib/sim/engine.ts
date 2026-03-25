@@ -130,7 +130,7 @@ export class SimulationEngine {
     }
 
     async step() {
-        await this.lua.doString(`_G.engine:step(); collectgarbage("collect")`);
+        await this.lua.doString(`_G.engine:step()`);
         return this.getState();
     }
 
