@@ -130,12 +130,72 @@ export class SimulationEngine {
     }
 
     async step() {
-        await this.lua.doString(`_G.engine:step()`);
+        await this.lua.doString(`_G.engine:step(); collectgarbage("collect")`);
         return this.getState();
     }
 
     async getState(): Promise<GameState> {
-        const raw = await this.lua.doString(`return _G.engine.game_state`);
+        // Serialize to a plain Lua table (no function values, no cycles)
+        // before returning to JS to keep the proxy chain minimal.
+        const raw = await this.lua.doString(`
+            local gs = _G.engine.game_state
+            local function copyGrifter(g)
+                local items = {}
+                for _, it in ipairs(g.items or {}) do
+                    items[#items+1] = { id=it.id, name=it.name, mod=it.mod }
+                end
+                local traits = {}
+                for _, t in ipairs(g.traits or {}) do
+                    traits[#traits+1] = { name=t.name, desc=t.desc, mod=t.mod }
+                end
+                return {
+                    id=g.id, name=g.name, status=g.status,
+                    stats={ sleight=g.stats.sleight, nerve=g.stats.nerve, read=g.stats.read, luck=g.stats.luck },
+                    traits=traits, items=items,
+                    fatigue=g.fatigue, suspicion=g.suspicion,
+                    settings={ cheat=g.settings.cheat, hours=g.settings.hours },
+                    location_id=g.location_id,
+                    lifetime_coins=g.lifetime_coins or 0,
+                    arrests=g.arrests or 0,
+                    win_rate=g.win_rate or 0.5
+                }
+            end
+            local function copyDistrict(d)
+                return {
+                    id=d.id, name=d.name, flavor=d.flavor,
+                    wealth=d.wealth, base_wealth=d.base_wealth,
+                    law=d.law, base_law=d.base_law,
+                    skill_avg=d.skill_avg, heat=d.heat
+                }
+            end
+            local grifters = {}
+            for _, g in ipairs(gs.grifters or {}) do
+                grifters[#grifters+1] = copyGrifter(g)
+            end
+            local districts = {}
+            for _, d in ipairs(gs.districts or {}) do
+                districts[#districts+1] = copyDistrict(d)
+            end
+            local shop_items = {}
+            for _, it in ipairs(gs.shop and gs.shop.items or {}) do
+                shop_items[#shop_items+1] = { id=it.id, name=it.name, desc=it.desc, cost=it.cost, sold=it.sold, mod=it.mod }
+            end
+            local hire_pool = {}
+            for _, h in ipairs(gs.shop and gs.shop.hire_pool or {}) do
+                hire_pool[#hire_pool+1] = {
+                    index=h.index, name=h.name, hired=h.hired, cost=h.cost,
+                    stats={ sleight=h.stats.sleight, nerve=h.stats.nerve, read=h.stats.read, luck=h.stats.luck },
+                    trait=h.trait and { name=h.trait.name, desc=h.trait.desc } or {}
+                }
+            end
+            return {
+                coins=gs.coins, day=gs.day,
+                game_over=gs.game_over, game_over_reason=gs.game_over_reason,
+                win=gs.win, win_target=gs.win_target,
+                grifters=grifters, districts=districts,
+                shop={ items=shop_items, hire_pool=hire_pool }
+            }
+        `);
         return luaToJS(raw) as GameState;
     }
 
