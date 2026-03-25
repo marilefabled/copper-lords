@@ -248,6 +248,15 @@ export class SimulationEngine {
         }
     }
 
+    async tick(): Promise<{ state: GameState; events: any[] }> {
+        const raw = await this.lua.doString(`return __cl_tick()`);
+        const result = luaToJS(raw) as any;
+        const events = result.events
+            ? (Array.isArray(result.events) ? result.events : Object.values(result.events))
+            : [];
+        return { state: result.state as GameState, events };
+    }
+
     async step() {
         await this.lua.doString(`__cl_step()`);
         return this.getState();
