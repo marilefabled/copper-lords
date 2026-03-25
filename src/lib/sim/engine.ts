@@ -25,16 +25,13 @@ function luaToJS(val: any): any {
     if (typeof val === 'function') return undefined;
     if (typeof val !== 'object') return val;
     if (typeof val.get === 'function' && typeof val.has === 'function') {
-        // It's a Lua table proxy (Map-like). Check if it's array-like.
         const result: any[] = [];
-        let isArray = true;
         let i = 1;
         while (val.has(i)) {
             result.push(luaToJS(val.get(i)));
             i++;
         }
         if (result.length > 0) {
-            // Also check for string keys (mixed table)
             const obj: any = {};
             let hasStringKeys = false;
             if (typeof val.forEach === 'function') {
@@ -46,29 +43,21 @@ function luaToJS(val: any): any {
                 });
             }
             if (hasStringKeys) {
-                // Mixed: array entries + string keys. Merge.
-                for (let j = 0; j < result.length; j++) {
-                    obj[j + 1] = result[j];
-                }
+                for (let j = 0; j < result.length; j++) obj[j + 1] = result[j];
                 return obj;
             }
             return result;
         }
-        // Object table
         const obj: any = {};
         if (typeof val.forEach === 'function') {
-            val.forEach((v: any, k: any) => {
-                obj[k] = luaToJS(v);
-            });
+            val.forEach((v: any, k: any) => { obj[k] = luaToJS(v); });
         }
         return obj;
     }
     if (Array.isArray(val)) return val.map(luaToJS);
     if (val.constructor === Object) {
         const out: any = {};
-        for (const k of Object.keys(val)) {
-            out[k] = luaToJS(val[k]);
-        }
+        for (const k of Object.keys(val)) out[k] = luaToJS(val[k]);
         return out;
     }
     return val;
@@ -123,6 +112,122 @@ export class SimulationEngine {
                 _G.engine = Engine.new({ seed = os.time(), log_sink = __js_log_sink })
                 CopperLords.init(_G.engine)
             `);
+
+            // Precompile all hot-path functions once so doString never
+            // recompiles them. Each tick only calls these named globals.
+            await this.lua.doString(`
+                local CL = require("copperlords")
+
+                _G.__cl_step = function()
+                    _G.engine:step()
+                end
+
+                _G.__cl_get_state = function()
+                    local gs = _G.engine.game_state
+                    local function copyMod(m)
+                        if not m then return {} end
+                        return {
+                            win_chance=m.win_chance, suspicion=m.suspicion,
+                            coins=m.coins, fatigue=m.fatigue, luck=m.luck,
+                            bribe_discount=m.bribe_discount
+                        }
+                    end
+                    local function copyGrifter(g)
+                        local items = {}
+                        for _, it in ipairs(g.items or {}) do
+                            items[#items+1] = { id=it.id, name=it.name, mod=copyMod(it.mod) }
+                        end
+                        local traits = {}
+                        for _, t in ipairs(g.traits or {}) do
+                            traits[#traits+1] = { name=t.name, desc=t.desc, mod=copyMod(t.mod) }
+                        end
+                        return {
+                            id=g.id, name=g.name, status=g.status,
+                            stats={ sleight=g.stats.sleight, nerve=g.stats.nerve,
+                                    read=g.stats.read, luck=g.stats.luck },
+                            traits=traits, items=items,
+                            fatigue=g.fatigue, suspicion=g.suspicion,
+                            settings={ cheat=g.settings.cheat, hours=g.settings.hours },
+                            location_id=g.location_id,
+                            lifetime_coins=g.lifetime_coins or 0,
+                            arrests=g.arrests or 0,
+                            win_rate=g.win_rate or 0.5
+                        }
+                    end
+                    local function copyDistrict(d)
+                        return {
+                            id=d.id, name=d.name, flavor=d.flavor,
+                            wealth=d.wealth, law=d.law,
+                            skill_avg=d.skill_avg, heat=d.heat
+                        }
+                    end
+                    local grifters = {}
+                    for _, g in ipairs(gs.grifters or {}) do
+                        grifters[#grifters+1] = copyGrifter(g)
+                    end
+                    local districts = {}
+                    for _, d in ipairs(gs.districts or {}) do
+                        districts[#districts+1] = copyDistrict(d)
+                    end
+                    local shop_items = {}
+                    for _, it in ipairs(gs.shop and gs.shop.items or {}) do
+                        shop_items[#shop_items+1] = {
+                            id=it.id, name=it.name, desc=it.desc,
+                            cost=it.cost, sold=it.sold, mod=copyMod(it.mod)
+                        }
+                    end
+                    local hire_pool = {}
+                    for _, h in ipairs(gs.shop and gs.shop.hire_pool or {}) do
+                        hire_pool[#hire_pool+1] = {
+                            index=h.index, name=h.name,
+                            hired=h.hired, cost=h.cost,
+                            stats={ sleight=h.stats.sleight, nerve=h.stats.nerve,
+                                    read=h.stats.read, luck=h.stats.luck },
+                            trait=h.trait and { name=h.trait.name, desc=h.trait.desc } or {}
+                        }
+                    end
+                    return {
+                        coins=gs.coins, day=gs.day,
+                        game_over=gs.game_over,
+                        game_over_reason=gs.game_over_reason or "",
+                        win=gs.win, win_target=gs.win_target,
+                        grifters=grifters, districts=districts,
+                        shop={ items=shop_items, hire_pool=hire_pool }
+                    }
+                end
+
+                _G.__cl_get_events = function()
+                    return _G.engine:pop_ui_events()
+                end
+
+                _G.__cl_set_setting = function(gid, key, val)
+                    for _, g in ipairs(_G.engine.game_state.grifters) do
+                        if g.id == gid then g.settings[key] = val; break end
+                    end
+                end
+
+                _G.__cl_move = function(gid, did)
+                    CL.move_grifter(_G.engine, gid, did)
+                end
+
+                _G.__cl_bribe = function(gid)
+                    local ok, cost = CL.bribe_grifter(_G.engine, gid)
+                    return ok and 1 or 0, cost or 0
+                end
+
+                _G.__cl_buy_item = function(iid, gid)
+                    return CL.buy_item(_G.engine, iid, gid) and 1 or 0
+                end
+
+                _G.__cl_hire = function(idx)
+                    return CL.hire_grifter(_G.engine, idx) and 1 or 0
+                end
+
+                _G.__cl_bribe_cost = function(gid)
+                    return CL.get_bribe_cost(_G.engine, gid)
+                end
+            `);
+
         } catch (err) {
             console.error("Simulation Engine Init Error:", err);
             throw err;
@@ -130,99 +235,29 @@ export class SimulationEngine {
     }
 
     async step() {
-        await this.lua.doString(`_G.engine:step()`);
+        await this.lua.doString(`__cl_step()`);
         return this.getState();
     }
 
     async getState(): Promise<GameState> {
-        // Serialize to a plain Lua table (no function values, no cycles)
-        // before returning to JS to keep the proxy chain minimal.
-        const raw = await this.lua.doString(`
-            local gs = _G.engine.game_state
-            local function copyGrifter(g)
-                local items = {}
-                for _, it in ipairs(g.items or {}) do
-                    items[#items+1] = { id=it.id, name=it.name, mod=it.mod }
-                end
-                local traits = {}
-                for _, t in ipairs(g.traits or {}) do
-                    traits[#traits+1] = { name=t.name, desc=t.desc, mod=t.mod }
-                end
-                return {
-                    id=g.id, name=g.name, status=g.status,
-                    stats={ sleight=g.stats.sleight, nerve=g.stats.nerve, read=g.stats.read, luck=g.stats.luck },
-                    traits=traits, items=items,
-                    fatigue=g.fatigue, suspicion=g.suspicion,
-                    settings={ cheat=g.settings.cheat, hours=g.settings.hours },
-                    location_id=g.location_id,
-                    lifetime_coins=g.lifetime_coins or 0,
-                    arrests=g.arrests or 0,
-                    win_rate=g.win_rate or 0.5
-                }
-            end
-            local function copyDistrict(d)
-                return {
-                    id=d.id, name=d.name, flavor=d.flavor,
-                    wealth=d.wealth, base_wealth=d.base_wealth,
-                    law=d.law, base_law=d.base_law,
-                    skill_avg=d.skill_avg, heat=d.heat
-                }
-            end
-            local grifters = {}
-            for _, g in ipairs(gs.grifters or {}) do
-                grifters[#grifters+1] = copyGrifter(g)
-            end
-            local districts = {}
-            for _, d in ipairs(gs.districts or {}) do
-                districts[#districts+1] = copyDistrict(d)
-            end
-            local shop_items = {}
-            for _, it in ipairs(gs.shop and gs.shop.items or {}) do
-                shop_items[#shop_items+1] = { id=it.id, name=it.name, desc=it.desc, cost=it.cost, sold=it.sold, mod=it.mod }
-            end
-            local hire_pool = {}
-            for _, h in ipairs(gs.shop and gs.shop.hire_pool or {}) do
-                hire_pool[#hire_pool+1] = {
-                    index=h.index, name=h.name, hired=h.hired, cost=h.cost,
-                    stats={ sleight=h.stats.sleight, nerve=h.stats.nerve, read=h.stats.read, luck=h.stats.luck },
-                    trait=h.trait and { name=h.trait.name, desc=h.trait.desc } or {}
-                }
-            end
-            return {
-                coins=gs.coins, day=gs.day,
-                game_over=gs.game_over, game_over_reason=gs.game_over_reason,
-                win=gs.win, win_target=gs.win_target,
-                grifters=grifters, districts=districts,
-                shop={ items=shop_items, hire_pool=hire_pool }
-            }
-        `);
+        const raw = await this.lua.doString(`return __cl_get_state()`);
         return luaToJS(raw) as GameState;
     }
 
     async setGrifterSetting(grifterId: number, key: string, value: any) {
-        await this.lua.doString(`
-            for _, g in ipairs(_G.engine.game_state.grifters) do
-                if g.id == ${grifterId} then
-                    g.settings["${key}"] = ${typeof value === 'string' ? `"${value}"` : value}
-                    break
-                end
-            end
-        `);
+        const luaVal = typeof value === 'string' ? `"${value}"` : value;
+        await this.lua.doString(`__cl_set_setting(${grifterId}, "${key}", ${luaVal})`);
     }
 
     async moveGrifter(grifterId: number, districtId: string) {
-        await this.lua.doString(`
-            local CopperLords = require("copperlords")
-            CopperLords.move_grifter(_G.engine, ${grifterId}, "${districtId}")
-        `);
+        await this.lua.doString(`__cl_move(${grifterId}, "${districtId}")`);
     }
 
     async bribeGrifter(grifterId: number): Promise<{ success: boolean; cost: number }> {
         try {
             const result = await this.lua.doString(`
-                local CopperLords = require("copperlords")
-                local ok, cost = CopperLords.bribe_grifter(_G.engine, ${grifterId})
-                return { ok = ok and 1 or 0, cost = cost or 0 }
+                local ok, cost = __cl_bribe(${grifterId})
+                return { ok=ok, cost=cost }
             `);
             const r = luaToJS(result);
             return { success: r.ok === 1, cost: r.cost || 0 };
@@ -234,10 +269,7 @@ export class SimulationEngine {
 
     async buyItem(itemId: string, grifterId: number): Promise<boolean> {
         try {
-            const result = await this.lua.doString(`
-                local CopperLords = require("copperlords")
-                if CopperLords.buy_item(_G.engine, "${itemId}", ${grifterId}) then return 1 else return 0 end
-            `);
+            const result = await this.lua.doString(`return __cl_buy_item("${itemId}", ${grifterId})`);
             return result === 1;
         } catch (err) {
             console.error("Buy item error:", err);
@@ -247,10 +279,7 @@ export class SimulationEngine {
 
     async hireGrifter(hireIndex: number): Promise<boolean> {
         try {
-            const result = await this.lua.doString(`
-                local CopperLords = require("copperlords")
-                if CopperLords.hire_grifter(_G.engine, ${hireIndex}) then return 1 else return 0 end
-            `);
+            const result = await this.lua.doString(`return __cl_hire(${hireIndex})`);
             return result === 1;
         } catch (err) {
             console.error("Hire error:", err);
@@ -260,10 +289,7 @@ export class SimulationEngine {
 
     async getBribeCost(grifterId: number): Promise<number> {
         try {
-            return await this.lua.doString(`
-                local CopperLords = require("copperlords")
-                return CopperLords.get_bribe_cost(_G.engine, ${grifterId})
-            `) || 0;
+            return await this.lua.doString(`return __cl_bribe_cost(${grifterId})`) || 0;
         } catch (err) {
             console.error("Get bribe cost error:", err);
             return 0;
@@ -272,7 +298,7 @@ export class SimulationEngine {
 
     async getEvents() {
         try {
-            const raw = await this.lua.doString(`return _G.engine:pop_ui_events()`);
+            const raw = await this.lua.doString(`return __cl_get_events()`);
             return luaToJS(raw);
         } catch (err) {
             console.error("Get events error:", err);
