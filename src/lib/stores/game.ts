@@ -1,5 +1,5 @@
 
-import { writable, get } from 'svelte/store';
+import { writable } from 'svelte/store';
 import { SimulationEngine, type GameState } from '../sim/engine';
 
 export const gameState = writable<GameState | null>(null);
@@ -29,16 +29,6 @@ export async function stepGame() {
     }
 }
 
-async function flushEvents() {
-    const events = await engine.getEvents();
-    if (events) {
-        const arr = Array.isArray(events) ? events : Object.values(events);
-        if (arr.length > 0) {
-            gameEvents.update(old => [...old, ...arr].slice(-50));
-        }
-    }
-}
-
 // Debounced setting update — writes to Lua immediately but only
 // refreshes JS state once after the user stops dragging.
 let settingTimer: any = null;
@@ -46,10 +36,10 @@ let settingTimer: any = null;
 export async function updateGrifterSetting(grifterId: number, key: string, value: any) {
     if (!engine) return;
 
-    // Write to Lua immediately (fire-and-forget the doString)
+    // Write to Lua immediately
     await engine.setGrifterSetting(grifterId, key, value);
 
-    // Also update local state optimistically so the slider doesn't fight
+    // Optimistic local update so the slider doesn't fight
     gameState.update(gs => {
         if (!gs) return gs;
         const g = gs.grifters.find((g: any) => g.id === grifterId);
@@ -57,7 +47,7 @@ export async function updateGrifterSetting(grifterId: number, key: string, value
         return gs;
     });
 
-    // Debounce the full Lua→JS state sync
+    // Debounce full Lua→JS sync
     clearTimeout(settingTimer);
     settingTimer = setTimeout(async () => {
         if (!engine) return;
@@ -68,36 +58,29 @@ export async function updateGrifterSetting(grifterId: number, key: string, value
 
 export async function moveGrifter(grifterId: number, districtId: string) {
     if (!engine) return;
-    await engine.moveGrifter(grifterId, districtId);
-    const state = await engine.getState();
+    // moveGrifter now returns state inline — no second getState() call
+    const state = await engine.moveGrifter(grifterId, districtId);
     gameState.set(state);
-    await flushEvents();
 }
 
 export async function bribeGrifter(grifterId: number) {
     if (!engine) return { success: false, cost: 0 };
-    const result = await engine.bribeGrifter(grifterId);
-    const state = await engine.getState();
+    const { success, cost, state } = await engine.bribeGrifter(grifterId);
     gameState.set(state);
-    await flushEvents();
-    return result;
+    return { success, cost };
 }
 
 export async function buyItem(itemId: string, grifterId: number) {
     if (!engine) return false;
-    const ok = await engine.buyItem(itemId, grifterId);
-    const state = await engine.getState();
+    const { ok, state } = await engine.buyItem(itemId, grifterId);
     gameState.set(state);
-    await flushEvents();
     return ok;
 }
 
 export async function hireGrifter(hireIndex: number) {
     if (!engine) return false;
-    const ok = await engine.hireGrifter(hireIndex);
-    const state = await engine.getState();
+    const { ok, state } = await engine.hireGrifter(hireIndex);
     gameState.set(state);
-    await flushEvents();
     return ok;
 }
 
