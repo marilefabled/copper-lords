@@ -19,9 +19,11 @@ export async function stepGame() {
     if (!engine || stepping) return;
     stepping = true;
     try {
-        const state = await engine.step();
+        const { state, events } = await engine.tick();
         gameState.set(state);
-        await flushEvents();
+        if (events.length > 0) {
+            gameEvents.update(old => [...old, ...events].slice(-50));
+        }
     } finally {
         stepping = false;
     }
